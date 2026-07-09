@@ -35,8 +35,7 @@ uv run python your_script.py
 
 ## MCP server
 
-`akd_ext/mcp/server.py` publishes every `@mcp_tool`-decorated tool over MCP. Two of them are
-backed by the SDE `/api/search` endpoint:
+This deployment exposes exactly two tools over MCP, both backed by the SDE `/api/search` endpoint:
 
 | Tool | Purpose |
 | --- | --- |
@@ -50,8 +49,14 @@ uv run python -m akd_ext.mcp.server                  # stdio (default)
 uv run python -m akd_ext.mcp.server --transport sse  # http/sse on :8000
 ```
 
-To host it, point a FastMCP Cloud project at the repository with entrypoint
-`akd_ext/mcp/server.py:mcp`.
+### Deploying to FastMCP Cloud
+
+Point a FastMCP Cloud project at this repository with entrypoint `akd_ext/mcp/server.py:mcp`, and
+set `GITHUB_ACCESS_TOKEN` (and optionally `SDE_BASE_URL`) in the project's environment.
+
+This branch ends with two `(deployment-only)` commits that trim the exposed tool set. They are not
+meant for `NASA-IMPACT/akd-ext`; the upstream pull request is opened from
+`fix/sde-search-endpoint-min-score`, which stops just below them.
 
 ### Environment
 
