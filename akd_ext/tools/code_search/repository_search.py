@@ -1,13 +1,21 @@
+"""
+Repository search over NASA's Science Discovery Engine (SDE).
+
+Finds scientific code repositories by querying the SDE ``/api/search`` endpoint
+scoped to ``Software and Tools`` documents, then enriches each GitHub hit with
+repository metadata and a computed reliability score.
+
+The SDE request itself is delegated to :class:`SDESearchTool` so that the search
+backend (endpoint, search mode, ``min_score``) is configured in exactly one place.
+"""
+
 import asyncio
-import json
 import os
 from typing import Literal
 from urllib.parse import urlparse
 
-import requests
 from loguru import logger
 from pydantic import Field, computed_field, model_validator
-from tenacity import retry, stop_after_attempt
 
 from akd.structures import SearchResultItem
 from akd.tools.misc import HttpUrlAdapter
@@ -19,6 +27,8 @@ from akd.tools.search import (
 )
 
 from akd_ext.mcp import mcp_tool
+from akd_ext.structures import SDEIndexedDocumentType
+from ..sde_search import SDEDocument, SDESearchTool, SDESearchToolConfig, SDESearchToolInputSchema
 from .utils import RepositoryMetadata, fetch_github_metadata, calculate_reliability_score
 
 
@@ -88,18 +98,28 @@ class RepositorySearchToolConfig(SearchToolConfig):
     Config schema for the repository search tool.
     """
 
-    # SDE search backend (formerly inherited from SDECodeSearchToolConfig).
+    # SDE search backend. base_url is the API host; the tool always queries
+    # /api/search filtered to "Software and Tools" documents.
     base_url: str = Field(
-        default_factory=lambda: os.getenv("SDE_BASE_URL", "https://d2kqty7z3q8ugg.cloudfront.net/api/code/search"),
-        description="SDE code search REST endpoint.",
+        default_factory=lambda: os.getenv("SDE_BASE_URL", "https://dyejsbdumgpqz.cloudfront.net"),
+        description="SDE API host.",
     )
-    page_size: int = Field(default=10, description="Number of results per page from the SDE API.")
-    max_pages: int = Field(default=1, description="Maximum number of pages to fetch per query.")
-    headers: dict = Field(
-        default_factory=lambda: {"Content-Type": "application/json", "Accept": "application/json"},
-        description="HTTP headers sent to the SDE API.",
+    page_size: int = Field(
+        default=10,
+        ge=1,
+        le=100,
+        description="Number of documents to fetch from the SDE API per query, before trimming to max_results.",
     )
     search_mode: Literal["hybrid", "vector", "keyword"] = Field(default="hybrid", description="SDE search mode.")
+    min_score: float = Field(
+        default=0.0,
+        ge=0.0,
+        description=(
+            "Lower bound on the _score a document must reach to be returned. Sent on every request "
+            "because the server applies its own default of 0.55 when the field is omitted, which is "
+            "above the score most documents receive and silently drops them."
+        ),
+    )
 
     # URL is the only stable identity signal for code repositories, so RRF and
     # deduplication are restricted to it (vs the upstream default of doi/title/url).
@@ -112,6 +132,21 @@ class RepositorySearchToolConfig(SearchToolConfig):
         default_factory=lambda: os.getenv("GITHUB_ACCESS_TOKEN", None),
         description="GitHub access token.",
     )
+
+
+def _github_repo_name(url: str) -> str | None:
+    """Return ``owner/repo`` for a GitHub URL, or None when the URL isn't one.
+
+    SDE indexes web pages alongside repositories, so a result URL is not
+    guaranteed to carry an owner and repo path segment.
+    """
+    parsed = urlparse(url)
+    if parsed.netloc.lower().removeprefix("www.") != "github.com":
+        return None
+    parts = [segment for segment in parsed.path.split("/") if segment]
+    if len(parts) < 2:
+        return None
+    return f"{parts[0]}/{parts[1]}"
 
 
 # Tool implementation
@@ -141,19 +176,19 @@ class RepositorySearchTool(SearchTool):
     output_schema = RepositorySearchToolOutputSchema
     config_schema = RepositorySearchToolConfig
 
-    @retry(stop=stop_after_attempt(2))
-    def _sde_search(self, page: int, query: str) -> list[dict]:
-        """POST a single SDE code-search request and return the ``documents`` list."""
-        payload = {
-            "page": page,
-            "pageSize": self.config.page_size,
-            "search_term": query,
-            "search_type": self.config.search_mode,
-        }
-        if self.debug:
-            logger.debug(f"SDE payload: {payload}")
-        response = requests.post(self.config.base_url, headers=self.config.headers, data=json.dumps(payload))
-        return response.json()["documents"]
+    @property
+    def sde_tool(self) -> SDESearchTool:
+        """SDE search tool used as this tool's search backend, built once per instance."""
+        if getattr(self, "_sde_tool", None) is None:
+            self._sde_tool = SDESearchTool(
+                config=SDESearchToolConfig(
+                    base_url=self.config.base_url,
+                    search_type=self.config.search_mode,
+                    min_score=self.config.min_score,
+                    timeout=float(self.config.timeout),
+                ),
+            )
+        return self._sde_tool
 
     async def _arun_single_query(
         self,
@@ -161,31 +196,37 @@ class RepositorySearchTool(SearchTool):
         max_results: int,
         **kwargs,
     ) -> SearchToolOutputSchema:
-        """Fetch a single query's worth of results from the SDE code search API."""
-        query_results: list[dict] = []
-        for page in range(1, self.config.max_pages + 1):
-            try:
-                page_results = self._sde_search(page=page, query=query)
-            except Exception as e:
-                logger.error(f"Error during SDE search for '{query}' page {page}: {e}")
-                continue
-            if not page_results:
-                break
-            for result in page_results:
-                result["query"] = query
-            query_results.extend(page_results)
-
-        formatted = [
-            SearchResultItem(
-                title=str(result.get("url", "")).split("/")[-1],
-                url=HttpUrlAdapter.validate_python(result.pop("url", "")),
-                content=result.pop("full_text", ""),
-                query=result.pop("query", ""),
-                extra=result,
+        """Fetch a single query's worth of ``Software and Tools`` documents from the SDE API."""
+        try:
+            sde_result = await self.sde_tool.arun(
+                SDESearchToolInputSchema(
+                    query=query,
+                    limit=self.config.page_size,
+                    doc_type=SDEIndexedDocumentType.SOFTWARE_TOOLS,
+                ),
             )
-            for result in query_results[:max_results]
-        ]
-        return SearchToolOutputSchema(results=formatted)
+        except Exception as e:
+            logger.error(f"Error during SDE search for '{query}': {e}")
+            return SearchToolOutputSchema(results=[])
+
+        formatted = [self._to_search_result_item(doc, query) for doc in sde_result.results if doc.url]
+        return SearchToolOutputSchema(results=formatted[:max_results])
+
+    @staticmethod
+    def _to_search_result_item(doc: SDEDocument, query: str) -> SearchResultItem:
+        """Map an SDE document onto a SearchResultItem, titling it by repository name."""
+        return SearchResultItem(
+            title=doc.url.rstrip("/").split("/")[-1] or doc.title,
+            url=HttpUrlAdapter.validate_python(doc.url),
+            content=doc.content,
+            query=query,
+            score=doc.score,
+            extra={
+                "division": doc.division,
+                "doc_type": doc.doc_type,
+                "source": doc.source,
+            },
+        )
 
     async def _arun(self, params: RepositorySearchToolInputSchema) -> RepositorySearchToolOutputSchema:
         search_result: SearchToolOutputSchema = await super()._arun(params)
@@ -199,14 +240,11 @@ class RepositorySearchTool(SearchTool):
         return repository_search_result
 
     async def _enrich_code_search_with_metadata(self, repository_item: SearchResultItem) -> RepositorySearchResultItem:
-        url: str = str(repository_item.url)
-        if not url:
+        repo_name: str | None = _github_repo_name(str(repository_item.url))
+        if repo_name is None:
+            # Non-GitHub results keep empty metadata; calculate_reliability_score
+            # returns None for it, which consumers treat as "no signal".
             return RepositorySearchResultItem(**repository_item.model_dump())
-        # Parse URL to extract owner/repo from github url
-        parsed_url = urlparse(url)
-        path_parts = parsed_url.path.strip("/").split("/")
-        owner, repo = path_parts[0], path_parts[1]
-        repo_name = f"{owner}/{repo}"
         repository_metadata: RepositoryMetadata = await fetch_github_metadata(repo_name, self.config.access_token)
         reliability_score: float | None = calculate_reliability_score(repository_metadata)
         return RepositorySearchResultItem(
@@ -219,7 +257,6 @@ class RepositorySearchTool(SearchTool):
 
 
 if __name__ == "__main__":
-    import asyncio
     import sys
 
     config = RepositorySearchToolConfig(page_size=2)
