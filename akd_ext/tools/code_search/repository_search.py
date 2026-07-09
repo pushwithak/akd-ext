@@ -15,7 +15,7 @@ from typing import Literal
 from urllib.parse import urlparse
 
 from loguru import logger
-from pydantic import Field, computed_field, model_validator
+from pydantic import Field, ValidationError, computed_field, model_validator
 
 from akd.structures import SearchResultItem
 from akd.tools.misc import HttpUrlAdapter
@@ -28,7 +28,13 @@ from akd.tools.search import (
 
 from akd_ext.mcp import mcp_tool
 from akd_ext.structures import SDEIndexedDocumentType
-from ..sde_search import SDEDocument, SDESearchTool, SDESearchToolConfig, SDESearchToolInputSchema
+from ..sde_search import (
+    DEFAULT_SDE_BASE_URL,
+    SDEDocument,
+    SDESearchTool,
+    SDESearchToolConfig,
+    SDESearchToolInputSchema,
+)
 from .utils import RepositoryMetadata, fetch_github_metadata, calculate_reliability_score
 
 
@@ -101,7 +107,7 @@ class RepositorySearchToolConfig(SearchToolConfig):
     # SDE search backend. base_url is the API host; the tool always queries
     # /api/search filtered to "Software and Tools" documents.
     base_url: str = Field(
-        default_factory=lambda: os.getenv("SDE_BASE_URL", "https://dyejsbdumgpqz.cloudfront.net"),
+        default_factory=lambda: os.getenv("SDE_BASE_URL", DEFAULT_SDE_BASE_URL),
         description="SDE API host.",
     )
     page_size: int = Field(
@@ -209,7 +215,16 @@ class RepositorySearchTool(SearchTool):
             logger.error(f"Error during SDE search for '{query}': {e}")
             return SearchToolOutputSchema(results=[])
 
-        formatted = [self._to_search_result_item(doc, query) for doc in sde_result.results if doc.url]
+        formatted: list[SearchResultItem] = []
+        for doc in sde_result.results:
+            if not doc.url:
+                continue
+            try:
+                formatted.append(self._to_search_result_item(doc, query))
+            except ValidationError as e:
+                # One unusable URL must not sink the whole query: SDE indexes web pages
+                # alongside repositories, and their URLs are not guaranteed to be http(s).
+                logger.debug(f"Skipping SDE result with unusable URL {doc.url!r}: {e}")
         return SearchToolOutputSchema(results=formatted[:max_results])
 
     @staticmethod

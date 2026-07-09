@@ -20,12 +20,16 @@ from loguru import logger
 from akd_ext.mcp import mcp_tool
 from akd_ext.structures import SDEIndexedDocumentType, NASASMDDivision
 
+#: Host of the SDE API. Every tool that talks to SDE resolves its default from here, so the
+#: deployment only has one place to change and one place to override via ``SDE_BASE_URL``.
+DEFAULT_SDE_BASE_URL = "https://dyejsbdumgpqz.cloudfront.net"
+
 
 class SDESearchToolConfig(BaseToolConfig):
     """Configuration for the SDE Search Tool."""
 
     base_url: str = Field(
-        default=os.getenv("SDE_BASE_URL", "https://dyejsbdumgpqz.cloudfront.net"),
+        default=os.getenv("SDE_BASE_URL", DEFAULT_SDE_BASE_URL),
         description="Base URL for the SDE API",
     )
     timeout: float = Field(
@@ -255,11 +259,12 @@ class SDESearchTool(BaseTool[SDESearchToolInputSchema, SDESearchToolOutputSchema
 
         logger.debug(f"Request body for SDE API: {request_body}")
 
-        # Make API request
+        # Make API request. base_url is rstripped because SDE_BASE_URL is shared with
+        # code_signals.py, whose default carries a trailing slash.
         async with httpx.AsyncClient(timeout=self.config.timeout) as client:
             try:
                 response = await client.post(
-                    f"{self.config.base_url}/api/search",
+                    f"{self.config.base_url.rstrip('/')}/api/search",
                     json=request_body,
                 )
                 response.raise_for_status()

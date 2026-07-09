@@ -13,7 +13,7 @@ from akd_ext.tools.code_search.repository_search import (
     RepositorySearchToolOutputSchema,
     _github_repo_name,
 )
-from akd_ext.tools.sde_search import SDESearchToolOutputSchema
+from akd_ext.tools.sde_search import DEFAULT_SDE_BASE_URL, SDEDocument, SDESearchToolOutputSchema
 
 
 class TestRepositorySearchTool:
@@ -124,3 +124,30 @@ class TestRepositorySearchBackend:
 
         assert enriched.reliability_score is None
         assert enriched.repository_metadata.is_null_metadata
+
+    @pytest.mark.unit
+    def test_shares_the_single_sde_host_constant(self):
+        """Both SDE-backed tools must resolve the same default host."""
+        assert RepositorySearchToolConfig().base_url == DEFAULT_SDE_BASE_URL
+
+    @pytest.mark.unit
+    async def test_unusable_url_is_skipped_not_fatal(self, monkeypatch):
+        """A single non-http(s) URL must not sink the whole query."""
+        tool = RepositorySearchTool(config=RepositorySearchToolConfig(page_size=3))
+
+        def _doc(url: str) -> SDEDocument:
+            return SDEDocument(query="q", title="t", content="c", score=1.0, url=url)
+
+        async def _arun(params, **kwargs):
+            return SDESearchToolOutputSchema(
+                results=[
+                    _doc("ftp://example.org/pkg"),  # unusable: not http(s)
+                    _doc("https://github.com/owner/repo"),
+                ],
+                extra={},
+            )
+
+        monkeypatch.setattr(tool.sde_tool, "arun", _arun)
+        out = await tool._arun_single_query("q", max_results=5)
+
+        assert [str(r.url) for r in out.results] == ["https://github.com/owner/repo"]
