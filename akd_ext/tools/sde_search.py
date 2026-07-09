@@ -25,12 +25,21 @@ class SDESearchToolConfig(BaseToolConfig):
     """Configuration for the SDE Search Tool."""
 
     base_url: str = Field(
-        default=os.getenv("SDE_BASE_URL", "https://d2kqty7z3q8ugg.cloudfront.net"),
+        default=os.getenv("SDE_BASE_URL", "https://dyejsbdumgpqz.cloudfront.net"),
         description="Base URL for the SDE API",
     )
     timeout: float = Field(
         default=30.0,
         description="HTTP request timeout in seconds",
+    )
+    min_score: float = Field(
+        default=0.0,
+        ge=0.0,
+        description=(
+            "Lower bound on the _score a document must reach to be returned. Sent on every request "
+            "because the server applies its own default of 0.55 when the field is omitted, which is "
+            "above the score most documents receive and silently drops them."
+        ),
     )
     division: NASASMDDivision | None = Field(
         None,
@@ -231,6 +240,7 @@ class SDESearchTool(BaseTool[SDESearchToolInputSchema, SDESearchToolOutputSchema
             "page": 1,
             "pageSize": fetch_size,
             "search_type": self.config.search_type,
+            "min_score": self.config.min_score,
         }
 
         # Add optional filters

@@ -306,3 +306,52 @@ async def test_sde_search_result_multiplier_disabled():
     assert result.extra.get("requested_limit") == limit
     # Results should equal the requested limit (no over-fetching when validation is off)
     assert len(result.results) <= limit
+
+
+@pytest.mark.unit
+async def test_sde_search_always_sends_min_score(monkeypatch):
+    """min_score must be on every request; omitting it lets the server apply its 0.55 default."""
+    captured: dict = {}
+
+    class _Response:
+        def raise_for_status(self) -> None: ...
+
+        @staticmethod
+        def json() -> dict:
+            return {"success": True, "total_count": 0, "documents": []}
+
+    async def _post(self, url, json=None, **kwargs):
+        captured["url"] = url
+        captured["body"] = json
+        return _Response()
+
+    monkeypatch.setattr(httpx.AsyncClient, "post", _post)
+
+    await SDESearchTool().arun(SDESearchToolInputSchema(query="anything", limit=3))
+
+    assert captured["url"].endswith("/api/search")
+    assert captured["body"]["min_score"] == 0.0
+
+
+@pytest.mark.unit
+async def test_sde_search_min_score_is_configurable(monkeypatch):
+    """A caller-supplied min_score reaches the API unchanged."""
+    captured: dict = {}
+
+    class _Response:
+        def raise_for_status(self) -> None: ...
+
+        @staticmethod
+        def json() -> dict:
+            return {"success": True, "total_count": 0, "documents": []}
+
+    async def _post(self, url, json=None, **kwargs):
+        captured["body"] = json
+        return _Response()
+
+    monkeypatch.setattr(httpx.AsyncClient, "post", _post)
+
+    tool = SDESearchTool(config=SDESearchToolConfig(min_score=0.8))
+    await tool.arun(SDESearchToolInputSchema(query="anything", limit=3))
+
+    assert captured["body"]["min_score"] == 0.8
