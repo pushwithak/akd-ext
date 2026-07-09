@@ -32,7 +32,6 @@ Example customization:
 from akd._base import InputSchema, OutputSchema
 from akd.tools import BaseTool
 from pydantic import Field
-from akd_ext.mcp import mcp_tool
 
 
 class DummyInputSchema(InputSchema):
@@ -47,7 +46,6 @@ class DummyOutputSchema(OutputSchema):
     query: str = Field(..., description="The query text returned unchanged")
 
 
-@mcp_tool
 class DummyTool(BaseTool[DummyInputSchema, DummyOutputSchema]):
     """
     Identity tool that returns the input query unchanged.
