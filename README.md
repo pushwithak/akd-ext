@@ -51,12 +51,18 @@ uv run python -m akd_ext.mcp.server --transport sse  # http/sse on :8000
 
 ### Deploying to FastMCP Cloud
 
-Point a FastMCP Cloud project at this repository with entrypoint `akd_ext/mcp/server.py:mcp`, and
-set `GITHUB_ACCESS_TOKEN` (and optionally `SDE_BASE_URL`) in the project's environment.
+Point a FastMCP Cloud project at this repository on branch `deploy/sde-repo-search`, with entrypoint
+`akd_ext/mcp/server.py:mcp`, and set `GITHUB_ACCESS_TOKEN` (and optionally `SDE_BASE_URL`) in the
+project's environment.
 
-This branch ends with two `(deployment-only)` commits that trim the exposed tool set. They are not
+This branch ends with three `(deployment-only)` commits that trim the exposed tool set. They are not
 meant for `NASA-IMPACT/akd-ext`; the upstream pull request is opened from
-`fix/sde-search-endpoint-min-score`, which stops just below them.
+`fix/sde-search-endpoint-min-score`, which stops just below them. When those fixes change, rebase
+this branch onto the new tip rather than editing it:
+
+```bash
+git rebase --onto fix/sde-search-endpoint-min-score <old-fix-tip> deploy/sde-repo-search
+```
 
 ### Environment
 
